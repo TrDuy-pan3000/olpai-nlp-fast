@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.ipynb_checkpoints/
+artifacts/
+olpai-artifacts/
+data/
+dataset/
+*.zip
+*.pt
+*.model
+*.vocab

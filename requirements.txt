@@ -1,0 +1,8 @@
+torch>=2.3
+sentencepiece>=0.2
+sacrebleu>=2.4
+pandas>=2.0
+numpy>=1.26
+tqdm>=4.66
+gdown>=5.2
+pytest>=8.0
