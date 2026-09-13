@@ -23,6 +23,17 @@ def test_notebook_is_one_click_colab_ready():
     assert "D:\\OlpAI" not in source
 
 
+def test_notebook_defaults_to_real_basic_transformer_training():
+    notebook = load_notebook()
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    assert "SMOKE_TEST = False" in source
+    assert "VOCAB_SIZE = 2000 if SMOKE_TEST else 8000" in source
+    assert "d_model=256" in source
+    assert "encoder_layers=4, decoder_layers=4" in source
+    for advanced_name in ("RMSNorm", "RoPE", "GroupedQueryAttention", "SwiGLU", "contrastive"):
+        assert advanced_name not in source
+
+
 def test_all_python_cells_compile():
     notebook = load_notebook()
     for index, cell in enumerate(notebook["cells"]):

@@ -17,6 +17,7 @@ from nlp_basic import (  # noqa: E402
     causal_mask,
     collate_batch,
     deduplicate_pairs,
+    filter_pairs_by_token_length,
     group_split,
     normalize_text,
     package_submission,
@@ -29,6 +30,19 @@ class FakeTokenizer:
 
     def encode(self, text, out_type=int):
         return [4 + (len(word) % 10) for word in text.split()]
+
+
+def test_filter_pairs_by_token_length_keeps_only_complete_examples():
+    pairs = [("a bb", "c"), ("a bb ccc dddd", "e")]
+    assert filter_pairs_by_token_length(pairs, FakeTokenizer(), max_len=5) == [("a bb", "c")]
+
+
+def test_default_config_is_basic_but_contest_sized():
+    config = ModelConfig()
+    assert config.vocab_size == 8000
+    assert config.d_model == 256
+    assert config.encoder_layers == 4
+    assert config.decoder_layers == 4
 
 
 def test_normalize_text_preserves_underscore_and_punctuation():

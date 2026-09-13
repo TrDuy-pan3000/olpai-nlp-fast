@@ -29,12 +29,12 @@ PAD_ID, UNK_ID, BOS_ID, EOS_ID = 0, 1, 2, 3
 class ModelConfig:
     """Cấu hình Fast Contest; giảm layer nếu chỉ chạy smoke test."""
 
-    vocab_size: int = 6000
-    d_model: int = 192
-    nhead: int = 6
-    encoder_layers: int = 3
-    decoder_layers: int = 3
-    dim_feedforward: int = 768
+    vocab_size: int = 8000
+    d_model: int = 256
+    nhead: int = 8
+    encoder_layers: int = 4
+    decoder_layers: int = 4
+    dim_feedforward: int = 1024
     dropout: float = 0.1
     max_len: int = 40
 
@@ -105,7 +105,7 @@ def build_translation_memory(src_lines: Sequence[str], tgt_lines: Sequence[str])
 
 
 def train_sentencepiece(
-    train_pairs: Sequence[tuple[str, str]], output_dir: str | Path, vocab_size: int = 6000
+    train_pairs: Sequence[tuple[str, str]], output_dir: str | Path, vocab_size: int = 8000
 ):
     """Huấn luyện joint BPE chỉ từ train; trả về SentencePieceProcessor."""
 
@@ -124,6 +124,18 @@ def train_sentencepiece(
     )
     sp = spm.SentencePieceProcessor(model_file=str(prefix) + ".model")
     return sp
+
+
+def filter_pairs_by_token_length(pairs, tokenizer, max_len: int = 40):
+    """Giữ các cặp vừa trọn max_len để không cắt mất phần cuối câu."""
+
+    kept = []
+    for src, tgt in tqdm(pairs, desc="Lọc độ dài", leave=False):
+        src_len = len(tokenizer.encode(src, out_type=int)) + 2  # BOS + EOS
+        tgt_len = len(tokenizer.encode(tgt, out_type=int)) + 2
+        if src_len <= max_len and tgt_len <= max_len:
+            kept.append((src, tgt))
+    return kept
 
 
 class TranslationDataset(Dataset):
