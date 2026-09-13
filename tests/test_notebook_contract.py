@@ -19,6 +19,7 @@ def test_notebook_is_one_click_colab_ready():
     assert "TrDuy-pan3000/olpai-nlp-fast.git" in source
     assert "190wIN301_X2Z7dqtPmLA7Z4Cggn3twl4" in source
     assert "files.download(str(submission))" in source
+    assert "sys.modules.pop('nlp_basic', None)" in source
     assert "drive.mount" not in source
     assert "D:\\OlpAI" not in source
 
