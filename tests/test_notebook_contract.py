@@ -66,6 +66,13 @@ def test_notebook_shows_transformer_architecture_instead_of_hiding_it():
     assert "def select_vi2zh_window" in source
 
 
+def test_notebook_avoids_colab_multiprocessing_loader_shutdown_warning():
+    notebook = load_notebook()
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    assert "config.max_len, True, 0" in source
+    assert "config.max_len, False, 0" in source
+
+
 def test_all_python_cells_compile():
     notebook = load_notebook()
     for index, cell in enumerate(notebook["cells"]):

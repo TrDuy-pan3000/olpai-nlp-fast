@@ -665,7 +665,7 @@ def package_submission(public_csv, private_csv, output_zip):
     return output_zip
 
 
-def make_loader(pairs, tokenizer, batch_size=128, max_len=40, shuffle=True, num_workers=2):
+def make_loader(pairs, tokenizer, batch_size=128, max_len=40, shuffle=True, num_workers=0):
     dataset = TranslationDataset(pairs, tokenizer, max_len)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch,
                       num_workers=num_workers, pin_memory=torch.cuda.is_available())
