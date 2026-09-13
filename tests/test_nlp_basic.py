@@ -9,7 +9,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from nlp_basic import (  # noqa: E402
+    BasicFeedForward,
+    BasicMultiHeadAttention,
+    BeamSearchHypothesis,
+    BidirectionalTranslationDataset,
+    ContrastiveConfig,
+    Decoder,
+    DecoderLayer,
+    Encoder,
+    EncoderLayer,
+    LabelSmoothedCrossEntropyLoss,
     ModelConfig,
+    ProjectionHead,
     Seq2SeqTransformer,
     TranslationDataset,
     WarmupInverseSqrtScheduler,
@@ -19,6 +30,10 @@ from nlp_basic import (  # noqa: E402
     deduplicate_pairs,
     filter_pairs_by_token_length,
     group_split,
+    contrastive_loss,
+    compute_crosslingual_loss,
+    mean_pool,
+    select_vi2zh_window,
     normalize_text,
     package_submission,
     write_submission_csv,
@@ -89,6 +104,54 @@ def test_transformer_forward_shape():
     logits = model(src, tgt[:, :-1])
     assert logits.shape == (2, 3, 32)
     assert model.output.weight.data_ptr() == model.embedding.weight.data_ptr()
+
+
+def test_explicit_basic_transformer_modules_are_usable():
+    x = torch.randn(2, 5, 24)
+    padding = torch.zeros(2, 5, dtype=torch.bool)
+
+    attention = BasicMultiHeadAttention(24, 4, 0.0)
+    feed_forward = BasicFeedForward(24, 48, 0.0)
+    assert attention(x, x, x, key_padding_mask=padding).shape == x.shape
+    assert feed_forward(x).shape == x.shape
+
+    encoder = Encoder(EncoderLayer(24, 4, 48, 0.0), num_layers=2, d_model=24)
+    decoder = Decoder(DecoderLayer(24, 4, 48, 0.0), num_layers=2, d_model=24)
+    encoded = encoder(x, padding)
+    decoded = decoder(x, encoded, padding, padding)
+    assert encoded.shape == x.shape
+    assert decoded.shape == x.shape
+
+
+def test_solution_skeleton_optional_modules_have_basic_equivalents():
+    dataset = BidirectionalTranslationDataset(
+        [("a bb", "c dd")], FakeTokenizer(), max_len=6, include_reverse=True
+    )
+    assert len(dataset) == 2
+
+    criterion = LabelSmoothedCrossEntropyLoss(ignore_index=0, smoothing=0.1)
+    assert criterion(torch.randn(4, 8), torch.tensor([1, 2, 3, 0])).ndim == 0
+
+    hypothesis = BeamSearchHypothesis(tokens=[2, 4], score=-1.0)
+    assert hypothesis.tokens[-1] == 4
+
+    config = ContrastiveConfig(d_model=24, projection_dim=12, temperature=0.1)
+    projection = ProjectionHead(config.d_model, config.projection_dim)
+    hidden = torch.randn(3, 5, 24)
+    pooled = mean_pool(hidden, torch.zeros(3, 5, dtype=torch.bool))
+    projected = projection(pooled)
+    assert projected.shape == (3, 12)
+    assert contrastive_loss(projected, projected, config.temperature).ndim == 0
+    assert select_vi2zh_window(epoch=4, start_epoch=3, end_epoch=5)
+
+    tiny_model = Seq2SeqTransformer(ModelConfig(
+        vocab_size=32, d_model=24, nhead=4, encoder_layers=1,
+        decoder_layers=1, dim_feedforward=48, dropout=0.0, max_len=8,
+    ))
+    src = torch.tensor([[2, 5, 3, 0], [2, 6, 7, 3]])
+    tgt = torch.tensor([[2, 8, 3, 0], [2, 9, 10, 3]])
+    loss = compute_crosslingual_loss(tiny_model, projection, src, tgt, config.temperature)
+    assert loss.ndim == 0
 
 
 def test_transformer_initial_logits_are_not_exploded():

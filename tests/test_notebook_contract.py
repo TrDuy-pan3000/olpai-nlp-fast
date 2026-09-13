@@ -31,8 +31,39 @@ def test_notebook_defaults_to_real_basic_transformer_training():
     assert "VOCAB_SIZE = 2000 if SMOKE_TEST else 8000" in source
     assert "d_model=256" in source
     assert "encoder_layers=4, decoder_layers=4" in source
-    for advanced_name in ("RMSNorm", "RoPE", "GroupedQueryAttention", "SwiGLU", "contrastive"):
-        assert advanced_name not in source
+    for forbidden_code in (
+        "class RMSNorm",
+        "class RoPE",
+        "class GroupedQueryAttentionRoPE",
+        "class FFN_SwiGLU",
+    ):
+        assert forbidden_code not in source
+
+
+def test_notebook_shows_transformer_architecture_instead_of_hiding_it():
+    notebook = load_notebook()
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    for class_name in (
+        "class BasicMultiHeadAttention",
+        "class BasicFeedForward",
+        "class EncoderLayer",
+        "class DecoderLayer",
+        "class Encoder",
+        "class Decoder",
+        "class Seq2SeqTransformer",
+    ):
+        assert class_name in source
+    assert "from nlp_basic import *" not in source
+    assert "self.transformer = nn.Transformer" not in source
+    assert "class LabelSmoothedCrossEntropyLoss" in source
+    assert "class BeamSearchHypothesis" in source
+    assert "class BidirectionalTranslationDataset" in source
+    assert "class ContrastiveConfig" in source
+    assert "class ProjectionHead" in source
+    assert "class WarmupInverseSqrtScheduler" in source
+    assert "def compute_crosslingual_loss" in source
+    assert "def contrastive_train_epoch" in source
+    assert "def select_vi2zh_window" in source
 
 
 def test_all_python_cells_compile():

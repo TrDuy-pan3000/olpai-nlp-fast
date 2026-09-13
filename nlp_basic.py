@@ -10,6 +10,7 @@ import math
 import random
 import unicodedata
 import zipfile
+from copy import deepcopy
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Iterable, Sequence
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
@@ -155,6 +157,20 @@ class TranslationDataset(Dataset):
         return self.items[index]
 
 
+class BidirectionalTranslationDataset(TranslationDataset):
+    """Bản basic của dataset hai chiều trong lời giải mẫu.
+
+    Nhánh này chỉ để học/thử nghiệm và mặc định tắt trong notebook vì bài thi
+    cần Hoa -> Việt. Khi bật, mỗi cặp được thêm một bản đảo Việt -> Hoa.
+    """
+
+    def __init__(self, pairs, tokenizer, max_len: int = 40, include_reverse: bool = False):
+        expanded = list(pairs)
+        if include_reverse:
+            expanded += [(tgt, src) for src, tgt in pairs]
+        super().__init__(expanded, tokenizer, max_len)
+
+
 def collate_batch(batch):
     src_list, tgt_list = zip(*batch)
     src = nn.utils.rnn.pad_sequence(src_list, batch_first=True, padding_value=PAD_ID)
@@ -183,20 +199,128 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x + self.pe[:, : x.size(1)])
 
 
+class BasicMultiHeadAttention(nn.Module):
+    """Attention chuẩn: mọi head có cùng kích thước, không GQA và không RoPE."""
+
+    def __init__(self, d_model: int, nhead: int, dropout: float):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True
+        )
+
+    def forward(self, query, key, value, key_padding_mask=None, attn_mask=None):
+        output, _ = self.attention(
+            query, key, value,
+            key_padding_mask=key_padding_mask,
+            attn_mask=attn_mask,
+            need_weights=False,
+        )
+        return output
+
+
+class BasicFeedForward(nn.Module):
+    """FFN cơ bản thay SwiGLU: Linear -> ReLU -> Dropout -> Linear."""
+
+    def __init__(self, d_model: int, dim_feedforward: int, dropout: float):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, d_model),
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+class EncoderLayer(nn.Module):
+    """Self-attention rồi FFN; mỗi nhánh có residual và LayerNorm."""
+
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float):
+        super().__init__()
+        self.self_attention = BasicMultiHeadAttention(d_model, nhead, dropout)
+        self.feed_forward = BasicFeedForward(d_model, dim_feedforward, dropout)
+        self.norm1, self.norm2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, padding_mask=None):
+        attended = self.self_attention(x, x, x, key_padding_mask=padding_mask)
+        x = self.norm1(x + self.dropout(attended))
+        transformed = self.feed_forward(x)
+        return self.norm2(x + self.dropout(transformed))
+
+
+class Encoder(nn.Module):
+    """Chồng nhiều EncoderLayer giống bộ khung lời giải mẫu."""
+
+    def __init__(self, layer: EncoderLayer, num_layers: int, d_model: int):
+        super().__init__()
+        self.layers = nn.ModuleList(deepcopy(layer) for _ in range(num_layers))
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, padding_mask=None):
+        for layer in self.layers:
+            x = layer(x, padding_mask)
+        return self.final_norm(x)
+
+
+class DecoderLayer(nn.Module):
+    """Masked self-attention, cross-attention với encoder, rồi FFN."""
+
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float):
+        super().__init__()
+        self.self_attention = BasicMultiHeadAttention(d_model, nhead, dropout)
+        self.cross_attention = BasicMultiHeadAttention(d_model, nhead, dropout)
+        self.feed_forward = BasicFeedForward(d_model, dim_feedforward, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, memory, tgt_padding_mask=None, memory_padding_mask=None):
+        mask = causal_mask(x.size(1), x.device)
+        attended = self.self_attention(
+            x, x, x, key_padding_mask=tgt_padding_mask, attn_mask=mask
+        )
+        x = self.norm1(x + self.dropout(attended))
+        crossed = self.cross_attention(
+            x, memory, memory, key_padding_mask=memory_padding_mask
+        )
+        x = self.norm2(x + self.dropout(crossed))
+        transformed = self.feed_forward(x)
+        return self.norm3(x + self.dropout(transformed))
+
+
+class Decoder(nn.Module):
+    """Chồng nhiều DecoderLayer giống bộ khung lời giải mẫu."""
+
+    def __init__(self, layer: DecoderLayer, num_layers: int, d_model: int):
+        super().__init__()
+        self.layers = nn.ModuleList(deepcopy(layer) for _ in range(num_layers))
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, memory, tgt_padding_mask=None, memory_padding_mask=None):
+        for layer in self.layers:
+            x = layer(x, memory, tgt_padding_mask, memory_padding_mask)
+        return self.final_norm(x)
+
+
 class Seq2SeqTransformer(nn.Module):
-    """Transformer Encoder-Decoder chuẩn, không có module tùy biến cao cấp."""
+    """Transformer viết tường minh để có thể đọc và thay từng khối."""
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.embedding = nn.Embedding(config.vocab_size, config.d_model, padding_idx=PAD_ID)
         self.position = PositionalEncoding(config.d_model, config.max_len, config.dropout)
-        self.transformer = nn.Transformer(
-            d_model=config.d_model, nhead=config.nhead,
-            num_encoder_layers=config.encoder_layers,
-            num_decoder_layers=config.decoder_layers,
-            dim_feedforward=config.dim_feedforward, dropout=config.dropout,
-            batch_first=True, norm_first=False,
+        self.encoder = Encoder(
+            EncoderLayer(config.d_model, config.nhead, config.dim_feedforward, config.dropout),
+            config.encoder_layers, config.d_model,
+        )
+        self.decoder = Decoder(
+            DecoderLayer(config.d_model, config.nhead, config.dim_feedforward, config.dropout),
+            config.decoder_layers, config.d_model,
         )
         self.output = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.output.weight = self.embedding.weight  # weight tying: ít tham số hơn
@@ -210,20 +334,107 @@ class Seq2SeqTransformer(nn.Module):
     def encode(self, src):
         src_pad = src.eq(PAD_ID)
         x = self.position(self.embedding(src) * self.scale)
-        return self.transformer.encoder(x, src_key_padding_mask=src_pad), src_pad
+        return self.encoder(x, src_pad), src_pad
 
     def decode(self, tgt, memory, src_pad):
         tgt_pad = tgt.eq(PAD_ID)
         y = self.position(self.embedding(tgt) * self.scale)
-        hidden = self.transformer.decoder(
-            y, memory, tgt_mask=causal_mask(tgt.size(1), tgt.device),
-            tgt_key_padding_mask=tgt_pad, memory_key_padding_mask=src_pad,
-        )
+        hidden = self.decoder(y, memory, tgt_pad, src_pad)
         return self.output(hidden)
 
     def forward(self, src, tgt_input):
         memory, src_pad = self.encode(src)
         return self.decode(tgt_input, memory, src_pad)
+
+
+class LabelSmoothedCrossEntropyLoss(nn.Module):
+    """Tên khối giống lời giải mẫu, bên trong dùng API chuẩn của PyTorch."""
+
+    def __init__(self, ignore_index: int = PAD_ID, smoothing: float = 0.1):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.smoothing = smoothing
+
+    def forward(self, logits, targets):
+        return F.cross_entropy(
+            logits, targets,
+            ignore_index=self.ignore_index,
+            label_smoothing=self.smoothing,
+        )
+
+
+@dataclass
+class ContrastiveConfig:
+    """Cấu hình nhánh contrastive tùy chọn; mặc định không chạy để tiết kiệm giờ thi."""
+
+    d_model: int = 256
+    projection_dim: int = 128
+    temperature: float = 0.1
+    weight: float = 0.0
+
+
+class ProjectionHead(nn.Module):
+    """Projection head tối giản thay cho nhánh contrastive phức tạp."""
+
+    def __init__(self, d_model: int, projection_dim: int):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, projection_dim),
+        )
+
+    def forward(self, x):
+        return F.normalize(self.layers(x), dim=-1)
+
+
+def mean_pool(hidden, padding_mask):
+    """Lấy trung bình các token thật, bỏ qua PAD."""
+
+    valid = (~padding_mask).unsqueeze(-1).to(hidden.dtype)
+    return (hidden * valid).sum(1) / valid.sum(1).clamp_min(1.0)
+
+
+def contrastive_loss(source_vectors, target_vectors, temperature: float = 0.1):
+    """InfoNCE đối xứng cơ bản; chỉ dùng khi CONTRASTIVE_WEIGHT > 0."""
+
+    source_vectors = F.normalize(source_vectors, dim=-1)
+    target_vectors = F.normalize(target_vectors, dim=-1)
+    logits = source_vectors @ target_vectors.T / temperature
+    labels = torch.arange(logits.size(0), device=logits.device)
+    return (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+
+
+def compute_crosslingual_loss(model, projection, src, tgt, temperature: float = 0.1):
+    """Mã hóa hai ngôn ngữ bằng cùng encoder rồi kéo đúng cặp lại gần nhau."""
+
+    source_hidden, source_pad = model.encode(src)
+    target_hidden, target_pad = model.encode(tgt)
+    source_vectors = projection(mean_pool(source_hidden, source_pad))
+    target_vectors = projection(mean_pool(target_hidden, target_pad))
+    return contrastive_loss(source_vectors, target_vectors, temperature)
+
+
+def select_vi2zh_window(epoch: int, start_epoch: int = 3, end_epoch: int = 5):
+    """Cửa sổ epoch đơn giản cho nhánh đảo chiều tùy chọn."""
+
+    return start_epoch <= epoch <= end_epoch
+
+
+def contrastive_train_epoch(model, projection, loader, optimizer, device, temperature=0.1):
+    """Một epoch contrastive tối giản, tách riêng và không bật trong cấu hình thi."""
+
+    model.train(); projection.train()
+    total = 0.0
+    for src, tgt in tqdm(loader, desc="Contrastive", leave=False):
+        src, tgt = src.to(device), tgt.to(device)
+        optimizer.zero_grad(set_to_none=True)
+        loss = compute_crosslingual_loss(model, projection, src, tgt, temperature)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(projection.parameters()), 1.0)
+        optimizer.step()
+        total += loss.item()
+    return total / max(1, len(loader))
 
 
 class WarmupInverseSqrtScheduler:
@@ -385,6 +596,14 @@ def translate_sentences(model, sentences, tokenizer, device, memory=None, batch_
     return [text or "" for text in results]
 
 
+@dataclass
+class BeamSearchHypothesis:
+    """Một ứng viên trong beam, tách thành class như lời giải mẫu."""
+
+    tokens: list[int]
+    score: float
+
+
 @torch.inference_mode()
 def beam_search_decode_sentence(model, sentence, tokenizer, device, beam_size=3, max_len=40, length_penalty=0.6):
     """Beam search dễ đọc; dùng tùy chọn khi còn thời gian, không phải mặc định."""
@@ -421,6 +640,16 @@ def write_submission_csv(src_lines, translations, output_path):
     output_path = Path(output_path); output_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output_path, index=False, encoding="utf-8-sig")
     return output_path
+
+
+def package_tokenizer(model_path, vocab_path, output_zip):
+    """Đóng gói tokenizer để mang checkpoint sang runtime khác."""
+
+    model_path, vocab_path, output_zip = map(Path, (model_path, vocab_path, output_zip))
+    with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.write(model_path, model_path.name)
+        archive.write(vocab_path, vocab_path.name)
+    return output_zip
 
 
 def package_submission(public_csv, private_csv, output_zip):
